@@ -1,0 +1,621 @@
+import { useState, useEffect } from 'react';
+import { Download, Building2, Plus, Trash2, Calculator as CalcIcon, Save } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import jsPDF from 'jspdf';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { base44 } from '@/api/base44Client';
+import { toast } from 'sonner';
+
+const formatCurrency = (num) => '$' + Number(num || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const formatDate = (dateStr) => {
+  if (!dateStr) return '';
+  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+export default function Calculator() {
+  const [activeTab, setActiveTab] = useState('calculator');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const [dealName, setDealName] = useState('');
+  const [sqft, setSqft] = useState('');
+  const [rentQuotedAs, setRentQuotedAs] = useState('sf');
+  const [rentAmount, setRentAmount] = useState('');
+  const [years, setYears] = useState(5);
+  const [includeFreeRent, setIncludeFreeRent] = useState(false);
+  const [freeMonths, setFreeMonths] = useState(2);
+  const [rentStructure, setRentStructure] = useState('annual');
+  const [annualEscalation, setAnnualEscalation] = useState(3);
+  const [escalationType, setEscalationType] = useState('percent');
+  const [escalationFrequency, setEscalationFrequency] = useState(3);
+  const [flatYears, setFlatYears] = useState(3);
+  const [stepFrequency, setStepFrequency] = useState(3);
+  const [commissionType, setCommissionType] = useState('flat');
+  const [flatRate, setFlatRate] = useState(3);
+  const [perSfRate, setPerSfRate] = useState(8.5);
+  const [tiers, setTiers] = useState([{ from: 1, to: 5, rate: 6 }]);
+  const [coBrokerSplit, setCoBrokerSplit] = useState(0);
+  const [notes, setNotes] = useState('');
+  const [splitPayments, setSplitPayments] = useState(true);
+  const [leaseExecutionDate, setLeaseExecutionDate] = useState('');
+  const [firstHalfPercent, setFirstHalfPercent] = useState(50);
+  const [daysToRentCommencement, setDaysToRentCommencement] = useState(90);
+  const [calculatedRentCommencementDate, setCalculatedRentCommencementDate] = useState('');
+  const [results, setResults] = useState(null);
+  const [lastCalculation, setLastCalculation] = useState(null);
+
+  const queryClient = useQueryClient();
+
+  const { data: savedDeals = [] } = useQuery({
+    queryKey: ['deals'],
+    queryFn: () => base44.entities.Deal.filter({ deal_type: 'lease' }),
+  });
+
+  const createDealMutation = useMutation({
+    mutationFn: (data) => base44.entities.Deal.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['deals'] });
+      toast.success('Deal saved and added to your pipeline!');
+    },
+  });
+
+  const deleteDealMutation = useMutation({
+    mutationFn: (id) => base44.entities.Deal.delete(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['deals'] }),
+  });
+
+  useEffect(() => {
+    if (leaseExecutionDate && daysToRentCommencement > 0) {
+      const d = new Date(leaseExecutionDate);
+      d.setDate(d.getDate() + daysToRentCommencement);
+      setCalculatedRentCommencementDate(d.toISOString().split('T')[0]);
+    } else setCalculatedRentCommencementDate('');
+  }, [leaseExecutionDate, daysToRentCommencement]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (Number(sqft) > 0 && Number(rentAmount) > 0 && years > 0) calculate();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [sqft, rentAmount, years, rentQuotedAs, includeFreeRent, freeMonths,
+    rentStructure, annualEscalation, escalationType, escalationFrequency,
+    flatYears, stepFrequency, commissionType, flatRate, perSfRate, tiers,
+    coBrokerSplit, splitPayments, leaseExecutionDate, firstHalfPercent, daysToRentCommencement]);
+
+  const calculate = () => {
+    const sqftN = Number(sqft);
+    const rentN = Number(rentAmount);
+    const baseAnnual = rentQuotedAs === 'sf' ? rentN * sqftN : rentN;
+    let annualRents = [], totalLease = 0, remainingFree = includeFreeRent ? freeMonths : 0;
+
+    for (let y = 1; y <= years; y++) {
+      let r = baseAnnual;
+      if (rentStructure === 'annual') {
+        r = escalationType === 'percent' ? r * Math.pow(1 + annualEscalation / 100, y - 1) : r + annualEscalation * (y - 1);
+      } else if (rentStructure === 'every-n') {
+        const steps = Math.floor((y - 1) / escalationFrequency);
+        r = escalationType === 'percent' ? r * Math.pow(1 + annualEscalation / 100, steps) : r + annualEscalation * steps;
+      } else if (rentStructure === 'flat-step' && y > flatYears) {
+        const steps = Math.floor((y - flatYears - 1) / stepFrequency) + 1;
+        r = escalationType === 'percent' ? r * Math.pow(1 + annualEscalation / 100, steps) : r + annualEscalation * steps;
+      }
+      if (remainingFree > 0) {
+        r = Math.max(0, r - Math.min(remainingFree, 12) * (r / 12));
+        remainingFree -= Math.min(remainingFree, 12);
+      }
+      annualRents.push(r);
+      totalLease += r;
+    }
+
+    let totalCommission = 0, yearCommissions = [];
+    if (commissionType === 'per-sf') {
+      totalCommission = sqftN * perSfRate;
+      yearCommissions = Array(years).fill(totalCommission / years);
+    } else if (commissionType === 'flat') {
+      yearCommissions = annualRents.map(r => r * (flatRate / 100));
+      totalCommission = yearCommissions.reduce((a, b) => a + b, 0);
+    } else {
+      yearCommissions = annualRents.map((rent, idx) => {
+        const yearNum = idx + 1;
+        let rate = 0;
+        for (let t of tiers) if (yearNum >= t.from && (t.to === 0 || yearNum <= t.to)) { rate = t.rate / 100; break; }
+        return rent * rate;
+      });
+      totalCommission = yearCommissions.reduce((a, b) => a + b, 0);
+    }
+
+    const coBrokerPayout = totalCommission * (coBrokerSplit / 100);
+    const yourNet = totalCommission - coBrokerPayout;
+    const firstHalfAmount = splitPayments ? yourNet * (firstHalfPercent / 100) : yourNet;
+    const secondHalfAmount = splitPayments ? yourNet - firstHalfAmount : 0;
+
+    const res = { totalLease, totalCommission, coBrokerPayout, yourNet, annualRents, yearCommissions, splitPayments, firstHalfAmount, secondHalfAmount, firstHalfDate: leaseExecutionDate, secondHalfDate: calculatedRentCommencementDate };
+    setResults(res);
+    setLastCalculation(res);
+  };
+
+  const exportPDF = () => {
+    if (!lastCalculation) return;
+    const doc = new jsPDF();
+    const calc = lastCalculation;
+    const pw = doc.internal.pageSize.getWidth();
+    let y = 25;
+    doc.setFillColor(34, 197, 94);
+    doc.rect(0, 0, pw, 20, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.text('DealTrack', 15, 14);
+    doc.setFontSize(10);
+    doc.text('Commercial Lease Commission Report', pw - 15, 14, { align: 'right' });
+    y = 35;
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(14);
+    doc.text(dealName || 'Untitled Deal', 15, y);
+    doc.setFontSize(10);
+    doc.text(new Date().toLocaleDateString(), pw - 15, y, { align: 'right' });
+    y += 15;
+    doc.setFontSize(12);
+    doc.text('Key Results', 15, y);
+    y += 10;
+    [['Total Lease Value', formatCurrency(calc.totalLease)], ['Total Commission', formatCurrency(calc.totalCommission)], ['Co-Broker Payout', formatCurrency(calc.coBrokerPayout)], ['Your Net Payout', formatCurrency(calc.yourNet)]].forEach(([l, v]) => {
+      doc.setFontSize(10);
+      doc.text(l + ':', 20, y);
+      doc.text(v, 95, y);
+      y += 8;
+    });
+    if (calc.splitPayments) {
+      y += 10;
+      doc.setFontSize(12);
+      doc.text('Payment Schedule', 15, y);
+      y += 10;
+      doc.setFontSize(10);
+      doc.text(`1st: ${formatCurrency(calc.firstHalfAmount)} on ${formatDate(calc.firstHalfDate)}`, 20, y);
+      y += 7;
+      doc.text(`2nd: ${formatCurrency(calc.secondHalfAmount)} on ${formatDate(calc.secondHalfDate)}`, 20, y);
+    }
+    if (notes) { y += 10; doc.text('Notes:', 15, y); y += 7; doc.text(doc.splitTextToSize(notes, pw - 40), 20, y); }
+    doc.save(`${dealName || 'Deal'}.pdf`);
+  };
+
+  const saveDeal = () => {
+    if (!lastCalculation) return;
+    const name = prompt('Deal name / property address?', dealName || 'New Lease Deal');
+    if (!name) return;
+    const firstHalfAmount = splitPayments ? lastCalculation.yourNet * (firstHalfPercent / 100) : lastCalculation.yourNet;
+    const secondHalfAmount = splitPayments ? lastCalculation.yourNet - firstHalfAmount : 0;
+    createDealMutation.mutate({
+      address: name.trim(),
+      deal_type: 'lease',
+      status: 'active',
+      sale_price: lastCalculation.totalLease,
+      sqft: Number(sqft),
+      rent_quoted_as: rentQuotedAs,
+      rent_amount: Number(rentAmount),
+      lease_years: years,
+      include_free_rent: includeFreeRent,
+      free_months: freeMonths,
+      rent_structure: rentStructure,
+      annual_escalation: annualEscalation,
+      escalation_type: escalationType,
+      escalation_frequency: escalationFrequency,
+      flat_years: flatYears,
+      step_frequency: stepFrequency,
+      commission_type: commissionType,
+      commission_rate: flatRate,
+      per_sf_rate: perSfRate,
+      tiers,
+      co_broker_split: coBrokerSplit,
+      notes,
+      split_payments: splitPayments,
+      lease_execution_date: leaseExecutionDate,
+      first_half_percent: firstHalfPercent,
+      days_to_rent_commencement: daysToRentCommencement,
+      total_lease_value: lastCalculation.totalLease,
+      total_commission: lastCalculation.totalCommission,
+      co_broker_payout: lastCalculation.coBrokerPayout,
+      your_net: lastCalculation.yourNet,
+      net_payout: lastCalculation.yourNet,
+      annual_rents: lastCalculation.annualRents,
+      year_commissions: lastCalculation.yearCommissions,
+      first_half_amount: firstHalfAmount,
+      second_half_amount: secondHalfAmount,
+      second_half_date: calculatedRentCommencementDate,
+    });
+  };
+
+  const loadDeal = (deal) => {
+    setDealName(deal.address || '');
+    setSqft(deal.sqft || '');
+    setRentQuotedAs(deal.rent_quoted_as || 'sf');
+    setRentAmount(deal.rent_amount || '');
+    setYears(deal.lease_years || 5);
+    setIncludeFreeRent(!!deal.include_free_rent);
+    setFreeMonths(deal.free_months || 2);
+    setRentStructure(deal.rent_structure || 'annual');
+    setAnnualEscalation(deal.annual_escalation || 3);
+    setEscalationType(deal.escalation_type || 'percent');
+    setEscalationFrequency(deal.escalation_frequency || 3);
+    setFlatYears(deal.flat_years || 3);
+    setStepFrequency(deal.step_frequency || 3);
+    setCommissionType(deal.commission_type || 'flat');
+    setFlatRate(deal.commission_rate || 3);
+    setPerSfRate(deal.per_sf_rate || 8.5);
+    setTiers(deal.tiers || [{ from: 1, to: 5, rate: 6 }]);
+    setCoBrokerSplit(deal.co_broker_split || 0);
+    setNotes(deal.notes || '');
+    setSplitPayments(deal.split_payments !== false);
+    setLeaseExecutionDate(deal.lease_execution_date || '');
+    setFirstHalfPercent(deal.first_half_percent || 50);
+    setDaysToRentCommencement(deal.days_to_rent_commencement || 90);
+    if (deal.total_commission) {
+      setResults({
+        totalLease: deal.sale_price, totalCommission: deal.total_commission,
+        coBrokerPayout: deal.co_broker_payout || 0, yourNet: deal.your_net,
+        annualRents: deal.annual_rents || [], yearCommissions: deal.year_commissions || [],
+        splitPayments: deal.split_payments !== false,
+        firstHalfAmount: deal.first_half_amount, secondHalfAmount: deal.second_half_amount,
+        firstHalfDate: deal.lease_execution_date, secondHalfDate: deal.second_half_date,
+      });
+    }
+    setActiveTab('calculator');
+  };
+
+  const deleteDeal = (id) => {
+    if (!confirm('Delete this deal?')) return;
+    deleteDealMutation.mutate(id);
+  };
+
+  const filteredDeals = savedDeals.filter(d => (d.address || '').toLowerCase().includes(searchTerm.toLowerCase()));
+  const addTier = () => setTiers([...tiers, { from: (tiers[tiers.length - 1]?.to || 0) + 1, to: 0, rate: 6 }]);
+  const removeTier = (i) => { if (tiers.length === 1) return; setTiers(tiers.filter((_, idx) => idx !== i)); };
+
+  return (
+    <div className="p-6 md:p-8 max-w-5xl mx-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <CalcIcon className="w-6 h-6" /> Lease Calculator
+          </h1>
+          <p className="text-muted-foreground text-sm mt-0.5">Commercial lease commission estimator</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={saveDeal} className="gap-1.5">
+            <Save className="w-4 h-4" /> Save
+          </Button>
+          <Button size="sm" onClick={exportPDF} className="gap-1.5">
+            <Download className="w-4 h-4" /> Export PDF
+          </Button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b mb-6">
+        {[{ id: 'calculator', label: 'Calculator' }, { id: 'saved', label: `Saved Deals${savedDeals.length > 0 ? ` (${savedDeals.length})` : ''}` }].map(tab => (
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+            className={`px-5 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${activeTab === tab.id ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'calculator' && (
+        <div className="space-y-6">
+          {/* Deal Details */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2"><Building2 className="w-4 h-4" /> Deal Details</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1.5">
+                <Label>Deal / Property Name</Label>
+                <Input value={dealName} onChange={e => setDealName(e.target.value)} placeholder="e.g. Raleigh Retail Plaza – Unit 104" />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Square Footage</Label>
+                  <Input type="number" value={sqft} onChange={e => setSqft(e.target.value)} placeholder="5000" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Rent Quoted As</Label>
+                  <Select value={rentQuotedAs} onValueChange={setRentQuotedAs}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sf">$/SF/Year</SelectItem>
+                      <SelectItem value="annual">Annual Rent</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>{rentQuotedAs === 'sf' ? '$/SF/Year' : 'Annual Rent'}</Label>
+                  <Input type="number" value={rentAmount} onChange={e => setRentAmount(e.target.value)} placeholder={rentQuotedAs === 'sf' ? '25' : '125000'} />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 items-end">
+                <div className="space-y-1.5">
+                  <Label>Lease Term (Years)</Label>
+                  <Input type="number" value={years} onChange={e => setYears(Number(e.target.value))} />
+                </div>
+                <div className="flex items-center gap-2 pb-1">
+                  <Checkbox id="freeRent" checked={includeFreeRent} onCheckedChange={setIncludeFreeRent} />
+                  <label htmlFor="freeRent" className="text-sm font-medium cursor-pointer">Free Rent</label>
+                </div>
+                {includeFreeRent && (
+                  <div className="space-y-1.5">
+                    <Label>Free Rent Months</Label>
+                    <Input type="number" value={freeMonths} onChange={e => setFreeMonths(Number(e.target.value))} />
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Rent Structure */}
+          <Card>
+            <CardHeader className="pb-3"><CardTitle className="text-base">Rent Structure</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1.5">
+                <Label>Structure Type</Label>
+                <Select value={rentStructure} onValueChange={setRentStructure}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="annual">Annual Escalations</SelectItem>
+                    <SelectItem value="flat">Flat Rent</SelectItem>
+                    <SelectItem value="every-n">Escalations Every N Years</SelectItem>
+                    <SelectItem value="flat-step">Flat Period + Step-Ups</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {rentStructure !== 'flat' && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  {rentStructure === 'flat-step' && (
+                    <div className="space-y-1.5">
+                      <Label>Flat Period (Years)</Label>
+                      <Input type="number" value={flatYears} onChange={e => setFlatYears(Number(e.target.value))} />
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <Label>Escalation Amount</Label>
+                    <div className="flex gap-2">
+                      <Input type="number" value={annualEscalation} onChange={e => setAnnualEscalation(Number(e.target.value))} />
+                      <Select value={escalationType} onValueChange={setEscalationType}>
+                        <SelectTrigger className="w-20"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="percent">%</SelectItem>
+                          <SelectItem value="dollar">$</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  {(rentStructure === 'every-n' || rentStructure === 'flat-step') && (
+                    <div className="space-y-1.5">
+                      <Label>{rentStructure === 'flat-step' ? 'Step Every (Years)' : 'Every N Years'}</Label>
+                      <Input type="number" value={rentStructure === 'flat-step' ? stepFrequency : escalationFrequency}
+                        onChange={e => rentStructure === 'flat-step' ? setStepFrequency(Number(e.target.value)) : setEscalationFrequency(Number(e.target.value))} />
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Commission */}
+          <Card>
+            <CardHeader className="pb-3"><CardTitle className="text-base">Commission Structure</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Commission Type</Label>
+                  <Select value={commissionType} onValueChange={setCommissionType}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="flat">Flat %</SelectItem>
+                      <SelectItem value="tiered">Tiered % (by Year)</SelectItem>
+                      <SelectItem value="per-sf">Per Square Foot ($/SF)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {commissionType === 'flat' && (
+                  <div className="space-y-1.5">
+                    <Label>Commission Rate (%)</Label>
+                    <Input type="number" step="0.1" value={flatRate} onChange={e => setFlatRate(Number(e.target.value))} />
+                  </div>
+                )}
+                {commissionType === 'per-sf' && (
+                  <div className="space-y-1.5">
+                    <Label>Rate ($/SF)</Label>
+                    <Input type="number" step="0.01" value={perSfRate} onChange={e => setPerSfRate(Number(e.target.value))} />
+                  </div>
+                )}
+              </div>
+
+              {commissionType === 'tiered' && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <Label>Tiers by Year</Label>
+                    <Button type="button" variant="outline" size="sm" onClick={addTier} className="h-7 text-xs gap-1">
+                      <Plus className="w-3 h-3" /> Add Tier
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    {tiers.map((tier, i) => (
+                      <div key={i} className="flex gap-2 items-center">
+                        <Input type="number" placeholder="From" value={tier.from} onChange={e => { const nt = [...tiers]; nt[i].from = Number(e.target.value); setTiers(nt); }} className="w-24" />
+                        <span className="text-muted-foreground text-sm">to</span>
+                        <Input type="number" placeholder="To" value={tier.to} onChange={e => { const nt = [...tiers]; nt[i].to = Number(e.target.value); setTiers(nt); }} className="w-24" />
+                        <Input type="number" placeholder="Rate %" value={tier.rate} onChange={e => { const nt = [...tiers]; nt[i].rate = Number(e.target.value); setTiers(nt); }} className="w-24" />
+                        <Button type="button" variant="ghost" size="icon" onClick={() => removeTier(i)} className="w-8 h-8 text-muted-foreground hover:text-destructive">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label>Co-Broker Share (%)</Label>
+                <Input type="number" value={coBrokerSplit} onChange={e => setCoBrokerSplit(Number(e.target.value))} className="w-32" placeholder="0" />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Payment Schedule */}
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base">Commission Payment Schedule</CardTitle>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="splitPay" checked={splitPayments} onCheckedChange={setSplitPayments} />
+                  <label htmlFor="splitPay" className="text-sm font-medium cursor-pointer">Split into two payments</label>
+                </div>
+              </div>
+            </CardHeader>
+            {splitPayments && (
+              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Lease Execution Date</Label>
+                  <Input type="date" value={leaseExecutionDate} onChange={e => setLeaseExecutionDate(e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>1st Payment % (of your net)</Label>
+                  <Input type="number" value={firstHalfPercent} onChange={e => setFirstHalfPercent(Number(e.target.value))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Days Until Rent Commencement</Label>
+                  <Input type="number" value={daysToRentCommencement} onChange={e => setDaysToRentCommencement(Number(e.target.value))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Calculated Rent Commencement</Label>
+                  <div className="h-9 flex items-center px-3 border rounded-md bg-muted text-sm text-muted-foreground">
+                    {calculatedRentCommencementDate ? formatDate(calculatedRentCommencementDate) : '—'}
+                  </div>
+                </div>
+              </CardContent>
+            )}
+          </Card>
+
+          {/* Notes */}
+          <Card>
+            <CardHeader className="pb-3"><CardTitle className="text-base">Notes</CardTitle></CardHeader>
+            <CardContent>
+              <Textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Add any notes about this deal..." rows={3} />
+            </CardContent>
+          </Card>
+
+          {/* Results */}
+          {results && (
+            <Card className="border-accent/30">
+              <CardHeader className="pb-3"><CardTitle className="text-base">Calculation Results</CardTitle></CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { label: 'Total Lease Value', value: results.totalLease, color: '' },
+                    { label: 'Total Commission', value: results.totalCommission, color: 'text-primary' },
+                    { label: 'Co-Broker Payout', value: results.coBrokerPayout, color: 'text-amber-600' },
+                    { label: 'Your Net Payout', value: results.yourNet, color: 'text-accent' },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} className="bg-muted/50 rounded-lg p-4">
+                      <p className="text-xs text-muted-foreground mb-1">{label}</p>
+                      <p className={`text-xl font-bold stat-number ${color}`}>{formatCurrency(value)}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {results.splitPayments && (
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Payment Schedule</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="border rounded-lg p-4">
+                        <p className="text-xs text-muted-foreground mb-1">1st Payment</p>
+                        <p className="text-lg font-bold stat-number">{formatCurrency(results.firstHalfAmount)}</p>
+                        <p className="text-xs text-muted-foreground mt-1">{formatDate(results.firstHalfDate) || 'Lease Execution Date'}</p>
+                      </div>
+                      <div className="border rounded-lg p-4">
+                        <p className="text-xs text-muted-foreground mb-1">2nd Payment</p>
+                        <p className="text-lg font-bold stat-number">{formatCurrency(results.secondHalfAmount)}</p>
+                        <p className="text-xs text-muted-foreground mt-1">{formatDate(results.secondHalfDate) || 'Rent Commencement Date'}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Year-by-Year Breakdown</p>
+                  <div className="rounded-lg border overflow-auto max-h-72">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/50">
+                        <tr>
+                          <th className="text-left py-3 px-4 font-medium text-muted-foreground">Year</th>
+                          <th className="text-right py-3 px-4 font-medium text-muted-foreground">Annual Rent</th>
+                          <th className="text-right py-3 px-4 font-medium text-muted-foreground">$/SF</th>
+                          <th className="text-right py-3 px-4 font-medium text-muted-foreground">Commission</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {results.annualRents.map((rent, i) => (
+                          <tr key={i} className="hover:bg-muted/30">
+                            <td className="py-3 px-4">{i + 1}</td>
+                            <td className="py-3 px-4 text-right stat-number">{formatCurrency(rent)}</td>
+                            <td className="py-3 px-4 text-right stat-number text-muted-foreground">{Number(sqft) > 0 ? (rent / Number(sqft)).toFixed(2) : '—'}</td>
+                            <td className="py-3 px-4 text-right stat-number font-medium">{formatCurrency(results.yearCommissions[i] || 0)}</td>
+                          </tr>
+                        ))}
+                        <tr className="bg-muted/50 font-semibold border-t-2">
+                          <td className="py-3 px-4">Total</td>
+                          <td className="py-3 px-4 text-right stat-number">{formatCurrency(results.totalLease)}</td>
+                          <td className="py-3 px-4"></td>
+                          <td className="py-3 px-4 text-right stat-number">{formatCurrency(results.totalCommission)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'saved' && (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">Saved Deals</h2>
+            <Input placeholder="Search deals..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-64" />
+          </div>
+          {filteredDeals.length === 0 ? (
+            <Card><CardContent className="py-12 text-center text-muted-foreground">No saved deals found.</CardContent></Card>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {filteredDeals.map(deal => (
+                <Card key={deal.id} className="group cursor-pointer hover:border-primary/30 transition-all relative" onClick={() => loadDeal(deal)}>
+                  <CardContent className="p-5">
+                    <div className="flex justify-between items-start pr-10">
+                      <div>
+                        <p className="font-semibold">{deal.address}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{new Date(deal.created_date).toLocaleDateString()}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-bold text-accent stat-number">{formatCurrency(deal.your_net)}</p>
+                        <p className="text-xs text-muted-foreground">your net</p>
+                      </div>
+                    </div>
+                    <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={e => { e.stopPropagation(); deleteDeal(deal.id); }} className="p-1.5 rounded bg-background border text-destructive hover:bg-muted"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
