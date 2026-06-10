@@ -1,0 +1,173 @@
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { base44 } from '@/api/base44Client';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
+import { Plus, Trash2, Save } from 'lucide-react';
+import { calculateCommission, formatCurrency } from '@/lib/commissionCalc';
+
+export default function SettingsPage() {
+  const queryClient = useQueryClient();
+
+  const { data: settingsArr = [], isLoading } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => base44.entities.Settings.list(),
+  });
+  const existing = settingsArr[0];
+
+  const [form, setForm] = useState({
+    default_commission_rate: 3,
+    default_agent_split_pct: 50,
+    default_agent_broker_split_pct: 70,
+    default_fees: [],
+  });
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (existing) {
+      setForm({
+        default_commission_rate: existing.default_commission_rate ?? 3,
+        default_agent_split_pct: existing.default_agent_split_pct ?? 50,
+        default_agent_broker_split_pct: existing.default_agent_broker_split_pct ?? 70,
+        default_fees: existing.default_fees ?? [],
+      });
+    }
+  }, [existing?.id]);
+
+  const mutation = useMutation({
+    mutationFn: async (data) => {
+      if (existing?.id) {
+        return base44.entities.Settings.update(existing.id, data);
+      } else {
+        return base44.entities.Settings.create(data);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    },
+  });
+
+  const set = (key, val) => setForm(f => ({ ...f, [key]: val }));
+  const addFee = () => setForm(f => ({ ...f, default_fees: [...(f.default_fees || []), { name: '', amount: '' }] }));
+  const updateFee = (i, key, val) => setForm(f => {
+    const fees = [...f.default_fees];
+    fees[i] = { ...fees[i], [key]: val };
+    return { ...f, default_fees: fees };
+  });
+  const removeFee = (i) => setForm(f => ({ ...f, default_fees: f.default_fees.filter((_, idx) => idx !== i) }));
+
+  const preview = calculateCommission({
+    sale_price: 500000,
+    commission_rate: form.default_commission_rate,
+    agent_split_pct: form.default_agent_split_pct,
+    agent_broker_split_pct: form.default_agent_broker_split_pct,
+    fees: form.default_fees,
+  });
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    mutation.mutate(form);
+  };
+
+  if (isLoading) return <div className="p-8"><div className="h-64 rounded-lg bg-muted animate-pulse" /></div>;
+
+  return (
+    <div className="p-6 md:p-8 max-w-2xl mx-auto">
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold">Settings</h1>
+        <p className="text-muted-foreground text-sm mt-0.5">Set your default commission structure for new deals</p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Defaults */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Default Commission Structure</CardTitle>
+            <CardDescription>These values auto-fill on every new deal you create</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-1.5">
+                <Label>Total Commission (%)</Label>
+                <Input type="number" step="0.1" value={form.default_commission_rate} onChange={e => set('default_commission_rate', e.target.value)} min="0" max="100" />
+                <p className="text-xs text-muted-foreground">e.g. 3 for 3%</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Agent Side (%)</Label>
+                <Input type="number" step="0.1" value={form.default_agent_split_pct} onChange={e => set('default_agent_split_pct', e.target.value)} min="0" max="100" />
+                <p className="text-xs text-muted-foreground">% of gross commission</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Agent Keeps (%)</Label>
+                <Input type="number" step="0.1" value={form.default_agent_broker_split_pct} onChange={e => set('default_agent_broker_split_pct', e.target.value)} min="0" max="100" />
+                <p className="text-xs text-muted-foreground">After broker split</p>
+              </div>
+            </div>
+
+            {/* Live preview at 500k */}
+            <div className="bg-muted/50 rounded-lg p-4 text-sm">
+              <p className="text-xs text-muted-foreground font-medium mb-2 uppercase tracking-wide">Preview on $500,000 sale</p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">Gross</p>
+                  <p className="font-semibold stat-number">{formatCurrency(preview.gross_commission)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Agent Side</p>
+                  <p className="font-semibold stat-number">{formatCurrency(preview.agent_side_commission)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Broker Cut</p>
+                  <p className="font-semibold text-destructive stat-number">−{formatCurrency(preview.broker_cut)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Net Payout</p>
+                  <p className="font-bold text-emerald-600 stat-number">{formatCurrency(preview.net_payout)}</p>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Default fees */}
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base">Default Fee Deductions</CardTitle>
+                <CardDescription className="mt-0.5">Recurring fees applied to every new deal</CardDescription>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={addFee} className="h-7 text-xs gap-1">
+                <Plus className="w-3 h-3" /> Add Fee
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {(form.default_fees || []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No default fees. Common examples: E&O Insurance, Transaction Coordinator Fee.</p>
+            ) : (
+              (form.default_fees || []).map((fee, i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <Input placeholder="Fee name (e.g. E&O Insurance)" value={fee.name} onChange={e => updateFee(i, 'name', e.target.value)} className="flex-1" />
+                  <Input type="number" placeholder="Amount" value={fee.amount} onChange={e => updateFee(i, 'amount', e.target.value)} className="w-28" min="0" />
+                  <Button type="button" variant="ghost" size="icon" onClick={() => removeFee(i)} className="w-8 h-8 text-muted-foreground hover:text-destructive">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Button type="submit" disabled={mutation.isPending} className="w-full gap-2">
+          <Save className="w-4 h-4" />
+          {saved ? 'Saved!' : mutation.isPending ? 'Saving...' : 'Save Settings'}
+        </Button>
+      </form>
+    </div>
+  );
+}
