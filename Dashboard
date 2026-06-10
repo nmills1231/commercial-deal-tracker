@@ -1,0 +1,101 @@
+import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
+import { base44 } from '@/api/base44Client';
+import { formatCurrency } from '@/lib/commissionCalc';
+import StatCard from '@/components/dashboard/StatCard';
+import DealCard from '@/components/deals/DealCard';
+import { Button } from '@/components/ui/button';
+import { Plus, TrendingUp, DollarSign, Clock, CheckCircle } from 'lucide-react';
+
+export default function Dashboard() {
+  const { data: deals = [], isLoading } = useQuery({
+    queryKey: ['deals'],
+    queryFn: () => base44.entities.Deal.list('-updated_date', 100),
+  });
+
+  const activeDeals = deals.filter(d => d.status === 'active');
+  const underContract = deals.filter(d => d.status === 'under_contract');
+  const closedDeals = deals.filter(d => d.status === 'closed');
+
+  // YTD closed earnings
+  const currentYear = new Date().getFullYear();
+  const ytdEarnings = closedDeals
+    .filter(d => d.close_date && new Date(d.close_date).getFullYear() === currentYear)
+    .reduce((sum, d) => sum + (d.net_payout || 0), 0);
+
+  const pipelineValue = [...activeDeals, ...underContract]
+    .reduce((sum, d) => sum + (d.net_payout || 0), 0);
+
+  const recentDeals = [...activeDeals, ...underContract].slice(0, 6);
+
+  return (
+    <div className="p-6 md:p-8 max-w-6xl mx-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
+          <p className="text-muted-foreground text-sm mt-0.5">Your real estate command center</p>
+        </div>
+        <Link to="/deals/new">
+          <Button className="gap-2">
+            <Plus className="w-4 h-4" />
+            New Deal
+          </Button>
+        </Link>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <StatCard label="YTD Earnings" value={formatCurrency(ytdEarnings)} sub={`${currentYear}`} icon={DollarSign} accent />
+        <StatCard label="Pipeline Value" value={formatCurrency(pipelineValue)} sub="Active + Under Contract" icon={TrendingUp} />
+        <StatCard label="Active Deals" value={activeDeals.length} sub="In progress" icon={Clock} />
+        <StatCard label="Closed Deals" value={closedDeals.length} sub="All time" icon={CheckCircle} />
+      </div>
+
+      {/* Active pipeline */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Active Pipeline</h2>
+          <Link to="/deals" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            View all →
+          </Link>
+        </div>
+
+        {isLoading ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="h-36 rounded-lg bg-muted animate-pulse" />
+            ))}
+          </div>
+        ) : recentDeals.length === 0 ? (
+          <div className="text-center py-16 border-2 border-dashed rounded-xl">
+            <TrendingUp className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+            <p className="text-muted-foreground font-medium">No active deals yet</p>
+            <p className="text-muted-foreground text-sm mt-1 mb-4">Start tracking your first deal</p>
+            <Link to="/deals/new">
+              <Button variant="outline" size="sm">
+                <Plus className="w-4 h-4 mr-1.5" /> Add Deal
+              </Button>
+            </Link>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {recentDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+          </div>
+        )}
+      </div>
+
+      {/* Recently closed */}
+      {closedDeals.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">Recently Closed</h2>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {closedDeals.slice(0, 3).map(deal => <DealCard key={deal.id} deal={deal} />)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
