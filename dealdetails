@@ -1,0 +1,248 @@
+import { useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { base44 } from '@/api/base44Client';
+import { calculateCommission, formatCurrency } from '@/lib/commissionCalc';
+import StatusBadge from '@/components/deals/StatusBadge';
+import CommissionBreakdown from '@/components/deals/CommissionBreakdown';
+import DealForm from '@/components/deals/DealForm';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ArrowLeft, Pencil, Trash2, MapPin, User, Calendar, Phone, Mail, FileText } from 'lucide-react';
+import { format } from 'date-fns';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+
+export default function DealDetail() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+
+  const { data: deal, isLoading } = useQuery({
+    queryKey: ['deal', id],
+    queryFn: () => base44.entities.Deal.filter({ id }),
+    select: (arr) => arr[0],
+  });
+
+  const { data: settingsArr = [] } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => base44.entities.Settings.list(),
+  });
+  const settings = settingsArr[0] || {};
+
+  const updateMutation = useMutation({
+    mutationFn: (data) => base44.entities.Deal.update(id, { ...data, ...calculateCommission(data) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['deal', id] });
+      queryClient.invalidateQueries({ queryKey: ['deals'] });
+      setEditing(false);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => base44.entities.Deal.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['deals'] });
+      navigate('/deals');
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="p-8 max-w-3xl mx-auto space-y-4">
+        {[1, 2, 3].map(i => <div key={i} className="h-32 rounded-lg bg-muted animate-pulse" />)}
+      </div>
+    );
+  }
+
+  if (!deal) {
+    return (
+      <div className="p-8 text-center">
+        <p className="text-muted-foreground">Deal not found.</p>
+        <Button variant="outline" onClick={() => navigate('/deals')} className="mt-4">Back to Deals</Button>
+      </div>
+    );
+  }
+
+  if (editing) {
+    return (
+      <div className="p-6 md:p-8 max-w-3xl mx-auto">
+        <button onClick={() => setEditing(false)} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
+          <ArrowLeft className="w-4 h-4" /> Cancel Edit
+        </button>
+        <h1 className="text-2xl font-bold mb-6">Edit Deal</h1>
+        <DealForm
+          initialData={deal}
+          defaults={settings}
+          onSubmit={updateMutation.mutate}
+          onCancel={() => setEditing(false)}
+          isSubmitting={updateMutation.isPending}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-6 md:p-8 max-w-3xl mx-auto">
+      {/* Back */}
+      <button onClick={() => navigate(-1)} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
+        <ArrowLeft className="w-4 h-4" /> Back
+      </button>
+
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 mb-6">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <MapPin className="w-4 h-4 text-muted-foreground" />
+            <h1 className="text-xl font-bold">{deal.address}</h1>
+          </div>
+          {deal.city && <p className="text-muted-foreground text-sm ml-6">{deal.city}</p>}
+          <div className="ml-6 mt-2">
+            <StatusBadge status={deal.status} />
+          </div>
+        </div>
+        <div className="flex gap-2 flex-shrink-0">
+          <Button variant="outline" size="sm" onClick={() => setEditing(true)} className="gap-1.5">
+            <Pencil className="w-3.5 h-3.5" /> Edit
+          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-1.5 text-destructive hover:text-destructive">
+                <Trash2 className="w-3.5 h-3.5" /> Delete
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this deal?</AlertDialogTitle>
+                <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={deleteMutation.mutate} className="bg-destructive hover:bg-destructive/90">
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      </div>
+
+      {/* Info Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        {/* Property */}
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-base">Property</CardTitle></CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            {deal.deal_type === 'lease' ? (
+              <>
+                <div className="flex justify-between"><span className="text-muted-foreground">Total Lease Value</span><span className="font-semibold stat-number">{formatCurrency(deal.sale_price)}</span></div>
+                {deal.sqft && <div className="flex justify-between"><span className="text-muted-foreground">Square Footage</span><span className="font-medium">{Number(deal.sqft).toLocaleString()} SF</span></div>}
+                {deal.lease_years && <div className="flex justify-between"><span className="text-muted-foreground">Lease Term</span><span className="font-medium">{deal.lease_years} years</span></div>}
+                {deal.rent_amount && <div className="flex justify-between"><span className="text-muted-foreground">Rent</span><span className="font-medium">{deal.rent_quoted_as === 'sf' ? `$${deal.rent_amount}/SF/yr` : formatCurrency(deal.rent_amount) + '/yr'}</span></div>}
+              </>
+            ) : (
+              <div className="flex justify-between"><span className="text-muted-foreground">Sale Price</span><span className="font-semibold stat-number">{formatCurrency(deal.sale_price)}</span></div>
+            )}
+            {deal.close_date && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">{deal.deal_type === 'lease' ? 'Lease Start' : 'Close Date'}</span>
+                <span className="font-medium flex items-center gap-1"><Calendar className="w-3 h-3" />{format(new Date(deal.close_date), 'MMM d, yyyy')}</span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Client */}
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-base">Client</CardTitle></CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            {deal.client_name && (
+              <div className="flex items-center gap-2">
+                <User className="w-3.5 h-3.5 text-muted-foreground" />
+                <span className="font-medium">{deal.client_name}</span>
+                <span className="text-xs text-muted-foreground capitalize">({deal.client_type})</span>
+              </div>
+            )}
+            {deal.client_email && (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Mail className="w-3.5 h-3.5" />
+                <span>{deal.client_email}</span>
+              </div>
+            )}
+            {deal.client_phone && (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Phone className="w-3.5 h-3.5" />
+                <span>{deal.client_phone}</span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Commission Breakdown */}
+      <Card className="mb-4">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Commission Breakdown</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {deal.deal_type === 'lease' ? (
+            <div className="space-y-2 text-sm">
+              {[
+                { label: 'Total Lease Value', value: deal.sale_price },
+                { label: 'Total Commission', value: deal.total_commission },
+                { label: 'Co-Broker Payout', value: deal.co_broker_payout, negative: true },
+                { label: 'Your Net Payout', value: deal.your_net, bold: true, green: true },
+              ].map(row => row.value != null && (
+                <div key={row.label} className={`flex justify-between py-1.5 ${row.bold ? 'border-t pt-2.5 font-semibold' : ''}`}>
+                  <span className="text-muted-foreground">{row.label}</span>
+                  <span className={`stat-number ${row.green ? 'text-accent font-bold' : ''} ${row.negative ? 'text-destructive' : ''}`}>
+                    {row.negative && row.value > 0 ? `−` : ''}{formatCurrency(row.value)}
+                  </span>
+                </div>
+              ))}
+              {deal.split_payments && (deal.first_half_amount || deal.second_half_amount) && (
+                <div className="mt-4 pt-3 border-t">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Payment Schedule</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-muted/50 rounded-lg p-3">
+                      <p className="text-xs text-muted-foreground">1st Payment</p>
+                      <p className="font-semibold stat-number">{formatCurrency(deal.first_half_amount)}</p>
+                      {deal.lease_execution_date && <p className="text-xs text-muted-foreground mt-0.5">{format(new Date(deal.lease_execution_date), 'MMM d, yyyy')}</p>}
+                    </div>
+                    <div className="bg-muted/50 rounded-lg p-3">
+                      <p className="text-xs text-muted-foreground">2nd Payment</p>
+                      <p className="font-semibold stat-number">{formatCurrency(deal.second_half_amount)}</p>
+                      {deal.second_half_date && <p className="text-xs text-muted-foreground mt-0.5">{format(new Date(deal.second_half_date), 'MMM d, yyyy')}</p>}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <CommissionBreakdown deal={deal} />
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Notes */}
+      {deal.notes && (
+        <Card>
+          <CardHeader className="pb-3"><CardTitle className="text-base flex items-center gap-2"><FileText className="w-4 h-4" />Notes</CardTitle></CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground whitespace-pre-wrap">{deal.notes}</p>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
