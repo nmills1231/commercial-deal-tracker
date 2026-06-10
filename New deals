@@ -1,0 +1,39 @@
+import { useNavigate } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { base44 } from '@/api/base44Client';
+import DealForm from '@/components/deals/DealForm';
+import { ArrowLeft } from 'lucide-react';
+
+export default function NewDeal() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const { data: settingsArr = [] } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => base44.entities.Settings.list(),
+  });
+  const settings = settingsArr[0] || {};
+
+  const mutation = useMutation({
+    mutationFn: (data) => base44.entities.Deal.create(data),
+    onSuccess: (deal) => {
+      queryClient.invalidateQueries({ queryKey: ['deals'] });
+      navigate(`/deals/${deal.id}`);
+    },
+  });
+
+  return (
+    <div className="p-6 md:p-8 max-w-3xl mx-auto">
+      <button onClick={() => navigate(-1)} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-6 transition-colors">
+        <ArrowLeft className="w-4 h-4" /> Back
+      </button>
+      <h1 className="text-2xl font-bold mb-6">New Deal</h1>
+      <DealForm
+        defaults={settings}
+        onSubmit={mutation.mutate}
+        onCancel={() => navigate(-1)}
+        isSubmitting={mutation.isPending}
+      />
+    </div>
+  );
+}
